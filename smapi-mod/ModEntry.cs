@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -15,6 +16,16 @@ namespace StardewMCPBridge
         private string bridgePath;
         private string actionDir;
         private BotManager botManager;
+
+        // --- chat capture (soren-play): mirror in-game chat into bridge_data.json ---
+        // The vanilla ChatBox trims its list, so we diff snapshots instead of
+        // trusting indices. Messages we sent ourselves (gold, via the "chat"
+        // action) are filtered out through recentSent so the AI only sees the
+        // player's side plus game notices.
+        private List<string> chatPrev;                       // last poll's raw texts (null until first poll seeds it)
+        private readonly List<object> chatOut = new();        // rolling window included in bridge JSON
+        private readonly Queue<string> recentSent = new();    // our own outbound texts, to skip on capture
+        private long chatSeq = 0;
         private Texture2D companion1Portrait;
         private Texture2D companion2Portrait;
         private Texture2D companion1Sprite;
@@ -155,6 +166,7 @@ namespace StardewMCPBridge
                         position = new { x = Game1.player.Position.X, y = Game1.player.Position.Y }
                     },
                     companions = this.botManager.GetBotStatus(),
+                    chat = this.CollectChat(),
                     npcs = Game1.currentLocation?.characters.Select(c => new {
                         name = c.Name,
                         position = new { x = c.Position.X, y = c.Position.Y }
@@ -223,6 +235,60 @@ namespace StardewMCPBridge
             }
         }
 
+        private static string ChatMessageText(StardewValley.Menus.ChatMessage m)
+        {
+            if (m?.message == null) return "";
+            // emoji snippets carry no text; render a placeholder so "❤ alone" isn't dropped as empty
+            return string.Concat(m.message.Select(s => s.message ?? "[emoji]"));
+        }
+
+        private object CollectChat()
+        {
+            try
+            {
+                var box = Game1.chatBox;
+                if (box?.messages == null) return this.chatOut;
+                var cur = box.messages.Select(ChatMessageText).ToList();
+
+                if (this.chatPrev == null)
+                {
+                    // first poll after load: seed the snapshot, don't replay history
+                    this.chatPrev = cur;
+                    return this.chatOut;
+                }
+
+                // The list appends new messages and trims old ones from the front,
+                // so the new tail of `cur` is whatever doesn't overlap `chatPrev`:
+                // find the largest m where cur[0..m) == the last m entries of chatPrev.
+                int overlap = 0;
+                for (int m = Math.Min(cur.Count, this.chatPrev.Count); m > 0; m--)
+                {
+                    bool match = true;
+                    for (int i = 0; i < m; i++)
+                    {
+                        if (cur[i] != this.chatPrev[this.chatPrev.Count - m + i]) { match = false; break; }
+                    }
+                    if (match) { overlap = m; break; }
+                }
+
+                for (int i = overlap; i < cur.Count; i++)
+                {
+                    string text = cur[i];
+                    if (string.IsNullOrWhiteSpace(text)) continue;
+                    if (this.recentSent.Contains(text)) continue;   // our own gold message echoing back
+                    this.chatOut.Add(new { seq = ++this.chatSeq, text, at = DateTime.UtcNow.ToString("o") });
+                }
+                while (this.chatOut.Count > 30) this.chatOut.RemoveAt(0);
+                this.chatPrev = cur;
+            }
+            catch (Exception ex)
+            {
+                // chat capture must never break the bridge sync
+                this.Monitor.Log($"Chat capture error: {ex.Message}", LogLevel.Trace);
+            }
+            return this.chatOut;
+        }
+
         private void HandleAction(string json)
         {
             using var doc = JsonDocument.Parse(json);
@@ -243,6 +309,9 @@ namespace StardewMCPBridge
                     string text = msg.GetString();
                     if (!string.IsNullOrEmpty(text))
                     {
+                        // remember our own text so CollectChat doesn't echo it back to the AI
+                        this.recentSent.Enqueue(text);
+                        while (this.recentSent.Count > 10) this.recentSent.Dequeue();
                         Game1.chatBox?.addMessage(text, Microsoft.Xna.Framework.Color.Gold);
                         this.Monitor.Log($"Chat sent: {text}", LogLevel.Info);
                     }
