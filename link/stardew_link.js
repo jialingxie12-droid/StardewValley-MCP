@@ -140,6 +140,13 @@ http.createServer((req, res) => {
 }).listen(CHAT_IN_PORT, "127.0.0.1", () => {
   console.log(`[link] 聊天耳朵开在 http://127.0.0.1:${CHAT_IN_PORT}/chat`);
 }).on("error", (e) => {
+  if (e.code === "EADDRINUSE") {
+    // 端口被占 = 另一个连接线已经在跑。两条线会在服务器上互相顶替（2026-07-12实测
+    // 无限互殴），所以这里直接退出，顺便当单实例锁用。
+    console.error("[link] 检测到另一个连接线窗口已经在跑，本窗口5秒后自动关闭（不用管我）");
+    setTimeout(() => process.exit(0), 5000);
+    return;
+  }
   console.error(`[link] 聊天耳朵起不来(${e.code})——游戏内聊天暂不可用，其余功能不受影响`);
 });
 
