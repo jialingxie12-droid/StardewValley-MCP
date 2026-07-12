@@ -18,6 +18,8 @@
  *   STARDEW_TOKEN   与 relay 侧一致的专用 token
  *   NAGI_URL        NagiBridge 地址，默认 http://127.0.0.1:7842（农场主）
  *                   二号玩家(farmhand)的游戏实例是 7843
+ *   CHAT_IN_PORT    本机聊天耳朵端口，默认 9000——NagiBridge 聊天窗(cc模式)
+ *                   出厂默认就 POST http://localhost:9000/chat，所以模组零配置
  */
 "use strict";
 
@@ -95,6 +97,8 @@ function connect() {
 }
 
 // 玩家在游戏里说话 → 推给服务器。轮询 /chat/history，用"最后一条的指纹"去重。
+// （注：上游 /chat/history 目前是空壳stub，这条路留着等上游修好；
+//   真正在用的入站通道是下面的本机聊天耳朵。2026-07-12）
 function startChatWatch() {
   stopChatWatch();
   chatTimer = setInterval(async () => {
@@ -111,6 +115,33 @@ function startChatWatch() {
   }, 1000);
 }
 function stopChatWatch() { if (chatTimer) { clearInterval(chatTimer); chatTimer = null; } }
+
+// 本机聊天耳朵（2026-07-12）：NagiBridge 的游戏内聊天窗（Mode="cc" 出厂默认）
+// 会把玩家打的字 POST 到 http://localhost:9000/chat（也是出厂默认地址）。
+// 这里接住转成 ws chat 帧，服务器侧原有的注入逻辑照单全收——双向喊话就此接通。
+const http = require("http");
+const CHAT_IN_PORT = parseInt(process.env.CHAT_IN_PORT || "9000", 10);
+let chatSeq = 0;
+http.createServer((req, res) => {
+  if (req.method !== "POST" || !req.url.startsWith("/chat")) { res.writeHead(404); res.end(); return; }
+  let body = "";
+  req.on("data", c => { body += c; if (body.length > 65536) req.destroy(); });
+  req.on("end", () => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end('{"ok":true}');
+    let text = "";
+    try { text = String(JSON.parse(body).message || "").trim(); } catch {}
+    if (!text) return;
+    console.log(`[link] 游戏内聊天 → 服务器: ${text.slice(0, 60)}`);
+    if (alive) {
+      try { ws.send(JSON.stringify({ type: "chat", messages: [{ seq: ++chatSeq, text, at: new Date().toISOString() }] })); } catch {}
+    }
+  });
+}).listen(CHAT_IN_PORT, "127.0.0.1", () => {
+  console.log(`[link] 聊天耳朵开在 http://127.0.0.1:${CHAT_IN_PORT}/chat`);
+}).on("error", (e) => {
+  console.error(`[link] 聊天耳朵起不来(${e.code})——游戏内聊天暂不可用，其余功能不受影响`);
+});
 
 console.log(`[link] NagiBridge: ${NAGI_URL}`);
 connect();
