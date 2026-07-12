@@ -23,21 +23,23 @@
 
 const WS_URL = process.env.STARDEW_WS || "wss://soren-xie.uk/stardew/ws";
 const TOKEN = process.env.STARDEW_TOKEN || "";
-const NAGI_URL = (process.env.NAGI_URL || "http://127.0.0.1:7842").replace(/\/$/, "");
+const NAGI_URL = (process.env.NAGI_URL || "http://localhost:7842").replace(/\/$/, "");
+const NAGI_FARMHAND = (process.env.NAGI_FARMHAND || "http://localhost:7843").replace(/\/$/, "");
 
-if (!TOKEN) { console.error("[link] STARDEW_TOKEN 未设置，退出"); process.exit(1); }
+if (!TOKEN) { console.error("[link] STARDEW_TOKEN not set"); process.exit(1); }
 if (typeof WebSocket === "undefined" || typeof fetch === "undefined") {
-  console.error("[link] 需要 Node 22+（自带WebSocket和fetch），当前 " + process.version);
+  console.error("[link] Need Node 22+ (built-in WebSocket+fetch), got " + process.version);
   process.exit(1);
 }
 
-async function nagi(method, path, body) {
+async function nagi(method, path, body, farmhand) {
+  const base = farmhand ? NAGI_FARMHAND : NAGI_URL;
   const opts = { method, headers: {} };
   if (body != null) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const r = await fetch(NAGI_URL + path, opts);
+  const r = await fetch(base + path, opts);
   const text = await r.text();
   let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
   if (!r.ok) throw new Error(`NagiBridge ${r.status}: ${text.slice(0, 200)}`);
@@ -66,10 +68,10 @@ function connect() {
       const res = { type: "res", id: msg.id };
       try {
         if (msg.op === "http") {
-          res.data = await nagi(msg.method || "GET", msg.path || "/state", msg.body);
-        } else if (msg.op === "state") {           // 兼容旧路由
-          res.data = await nagi("GET", "/state");
-        } else if (msg.op === "action") {          // 兼容旧路由：chat动作转 /chat/push
+          res.data = await nagi(msg.method || "GET", msg.path || "/state", msg.body, !!msg.farmhand);
+        } else if (msg.op === "state") {
+          res.data = await nagi("GET", "/state", null, !!msg.farmhand);
+        } else if (msg.op === "action") {
           const a = msg.action || {};
           if (a.actionType === "chat") {
             res.data = await nagi("POST", "/chat/push", { sender: "苏林", message: a.metadata?.message || "" });
